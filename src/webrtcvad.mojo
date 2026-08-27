@@ -215,30 +215,28 @@ def offset_value(channel: Int) -> Int:
     return 176
 
 
+@always_inline
 def split_filter(
     s: I32Ptr, input_offset: Int, length: Int, upper_offset: Int,
     lower_offset: Int, hp_offset: Int, lp_offset: Int
 ):
     var half = length >> 1
-    var state32 = Int(s[upper_offset]) << 16
+    var upper_state32 = Int(s[upper_offset]) << 16
+    var lower_state32 = Int(s[lower_offset]) << 16
     for i in range(half):
-        var sample = Int(s[input_offset + 2 * i])
-        var tmp32 = state32 + allpass_coef(0) * sample
-        var tmp16 = s16(tmp32 >> 16)
-        s[hp_offset + i] = Int32(tmp16)
-        state32 = (sample << 14) - allpass_coef(0) * tmp16
-        state32 *= 2
-    s[upper_offset] = Int32(s16(state32 >> 16))
+        var upper_sample = Int(s[input_offset + 2 * i])
+        var upper_tmp32 = upper_state32 + 20972 * upper_sample
+        var upper_tmp16 = s16(upper_tmp32 >> 16)
+        s[hp_offset + i] = Int32(upper_tmp16)
+        upper_state32 = ((upper_sample << 14) - 20972 * upper_tmp16) * 2
 
-    state32 = Int(s[lower_offset]) << 16
-    for i in range(half):
-        var sample = Int(s[input_offset + 2 * i + 1])
-        var tmp32 = state32 + allpass_coef(1) * sample
-        var tmp16 = s16(tmp32 >> 16)
-        s[lp_offset + i] = Int32(tmp16)
-        state32 = (sample << 14) - allpass_coef(1) * tmp16
-        state32 *= 2
-    s[lower_offset] = Int32(s16(state32 >> 16))
+        var lower_sample = Int(s[input_offset + 2 * i + 1])
+        var lower_tmp32 = lower_state32 + 5571 * lower_sample
+        var lower_tmp16 = s16(lower_tmp32 >> 16)
+        s[lp_offset + i] = Int32(lower_tmp16)
+        lower_state32 = ((lower_sample << 14) - 5571 * lower_tmp16) * 2
+    s[upper_offset] = Int32(s16(upper_state32 >> 16))
+    s[lower_offset] = Int32(s16(lower_state32 >> 16))
 
     comptime W = simd_width_of[DType.int32]()
     var i = 0
@@ -638,6 +636,24 @@ def downsample_by_2(s: I32Ptr, input_offset: Int, output_offset: Int, state_offs
     s[state_offset + 1] = Int32(state1)
 
 
+def downsample_audio_by_2(
+    s: I32Ptr, audio: I16Ptr, output_offset: Int, state_offset: Int, length: Int
+):
+    var state0 = Int(s[state_offset])
+    var state1 = Int(s[state_offset + 1])
+    var half = length >> 1
+    for i in range(half):
+        var sample0 = Int(audio[2 * i])
+        var tmp1 = s16((state0 >> 1) + ((5243 * sample0) >> 14))
+        state0 = sample0 - ((5243 * tmp1) >> 12)
+        var sample1 = Int(audio[2 * i + 1])
+        var tmp2 = s16((state1 >> 1) + ((1392 * sample1) >> 14))
+        state1 = sample1 - ((1392 * tmp2) >> 12)
+        s[output_offset + i] = Int32(s16(tmp1 + tmp2))
+    s[state_offset] = Int32(state0)
+    s[state_offset + 1] = Int32(state1)
+
+
 def resample_allpass(branch: Int, stage: Int) -> Int:
     if branch == 0:
         if stage == 0: return 821
@@ -1018,33 +1034,33 @@ def process_frame(state_address: Int, audio_address: Int, rate: Int, length: Int
         return -1
     var s = I32Ptr(unsafe_from_address=state_address)
     var audio = I16Ptr(unsafe_from_address=audio_address)
-    comptime W = simd_width_of[DType.int16]()
-    var i = 0
-    while i + W <= length:
-        var samples = audio.load[width=W](i).cast[DType.int32]()
-        s.store(TEMP32 + i, samples)
-        i += W
-    while i < length:
-        s[TEMP32 + i] = Int32(audio[i])
-        i += 1
     var vad_length = length
     if rate == 8000:
-        comptime COPY_W = simd_width_of[DType.int32]()
-        i = 0
-        while i + COPY_W <= length:
-            s.store(DATA8 + i, s.load[width=COPY_W](TEMP32 + i))
-            i += COPY_W
+        comptime W = simd_width_of[DType.int16]()
+        var i = 0
+        while i + W <= length:
+            s.store(DATA8 + i, audio.load[width=W](i).cast[DType.int32]())
+            i += W
         while i < length:
-            s[DATA8 + i] = s[TEMP32 + i]
+            s[DATA8 + i] = Int32(audio[i])
             i += 1
     elif rate == 16000:
-        downsample_by_2(s, TEMP32, DATA8, DOWNSAMPLE, length)
+        downsample_audio_by_2(s, audio, DATA8, DOWNSAMPLE, length)
         vad_length = length >> 1
-    elif rate == 32000:
+    else:
+        comptime W = simd_width_of[DType.int16]()
+        var i = 0
+        while i + W <= length:
+            s.store(TEMP32 + i, audio.load[width=W](i).cast[DType.int32]())
+            i += W
+        while i < length:
+            s[TEMP32 + i] = Int32(audio[i])
+            i += 1
+    if rate == 32000:
         downsample_by_2(s, TEMP32, TEMP32 + 960, DOWNSAMPLE + 2, length)
         downsample_by_2(s, TEMP32 + 960, DATA8, DOWNSAMPLE, length >> 1)
         vad_length = length >> 2
-    else:
+    elif rate == 48000:
         var frames = length / 480
         # Preserve WebRTC VAD 2.0.10's fixed input pointer across 10 ms blocks.
         for frame in range(frames):

@@ -89,23 +89,26 @@ the public Python API. Ratios below 1 mean Mojo is slower.
 
 | case | mojo-webrtcvad | upstream | upstream / Mojo |
 | --- | ---: | ---: | ---: |
-| scalar 8 kHz / 10 ms | 4.46 us/frame | 1.83 us/frame | 0.41x slower |
-| scalar 16 kHz / 20 ms | 6.17 us/frame | 3.06 us/frame | 0.50x slower |
-| scalar 48 kHz / 30 ms | 23.68 us/frame | 26.19 us/frame | 1.11x faster |
-| batch 30 s, 16 kHz / 10 ms | 2.68 us/frame | 2.55 us/frame | 0.95x slower |
-| batch 30 s, 48 kHz / 30 ms | 22.90 us/frame | 22.54 us/frame | 0.98x slower |
+| scalar 8 kHz / 10 ms | 3.39 us/frame | 1.67 us/frame | 0.49x slower |
+| scalar 16 kHz / 20 ms | 4.26 us/frame | 2.87 us/frame | 0.67x slower |
+| scalar 48 kHz / 30 ms | 18.58 us/frame | 22.09 us/frame | 1.19x faster |
+| batch 30 s, 16 kHz / 10 ms | 2.04 us/frame | 2.35 us/frame | 1.15x faster |
+| batch 30 s, 48 kHz / 30 ms | 17.20 us/frame | 21.67 us/frame | 1.26x faster |
 
 Upstream's scalar API is a direct CPython C extension and is faster for the
-small 8 and 16 kHz frames in this run. The bytes fast path passes the CPython
-buffer address directly and caches ctypes functions and the detector-state
-address. Other contiguous buffer-protocol inputs remain zero-copy through
-NumPy. Batching removes most boundary cost; the batch results in this run are
-within five percent of upstream.
+small 8 and 16 kHz frames in this run. The exact-bytes fast path passes the
+CPython buffer address directly, skips generic buffer helpers, and caches
+ctypes functions and the detector-state address. Other contiguous
+buffer-protocol inputs remain zero-copy through NumPy. Batching removes most
+boundary cost and is 15–26 percent faster than upstream in this run.
 
-The independent filter combination, energy reduction, PCM widening, copies,
-and 48-to-32 kHz FIR use native-width integer SIMD with scalar remainder loops.
-Recursive resampler state stays in registers between samples. Batch frames are
-not thread-parallelized because both the adaptive detector and resampler carry
+The independent filter combination, energy reduction, PCM widening, and
+48-to-32 kHz FIR use native-width integer SIMD with scalar remainder loops.
+The 8 kHz path widens PCM directly into the filterbank input, while the 16 kHz
+decimator reads the int16 PCM buffer directly instead of materializing an
+int32 copy. Independent all-pass branches are fused and inlined; recursive
+state stays in registers between samples. Batch frames are not
+thread-parallelized because both the adaptive detector and resampler carry
 state into the next frame; the only independent FIR section has just 80 output
 blocks per 10 ms chunk, below a useful thread-launch threshold.
 

@@ -93,13 +93,27 @@ class Vad:
             raise Error(f"Unable to set mode to {mode}")
 
     def is_speech(self, buf, sample_rate, length=None):
-        sample_rate = _c_int(sample_rate, "sample rate")
+        if type(sample_rate) is int:
+            if sample_rate > 2**31 - 1 or sample_rate < -(2**31):
+                raise ValueError(f"{sample_rate} is an invalid sample rate")
+        else:
+            sample_rate = _c_int(sample_rate, "sample rate")
+        if length is None and type(buf) is bytes:
+            length = len(buf) // 2
+            sample_address = _bytes_address(buf)
+            if not sample_address:
+                raise Error("PCM buffer has a null address")
+            result = self._process(
+                self._state_address, sample_address, sample_rate, length
+            )
+            if result < 0:
+                raise Error("Error while processing frame")
+            return bool(result)
         if length is None:
             try:
-                size = len(buf) if type(buf) is bytes else memoryview(buf).nbytes
+                length = memoryview(buf).nbytes // 2
             except TypeError as exc:
                 raise Error("Error while processing frame") from exc
-            length = size // 2
         else:
             length = _c_int(length, "length")
         if length < 0:
